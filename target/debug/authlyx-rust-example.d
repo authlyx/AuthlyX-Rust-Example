@@ -1,0 +1,1 @@
+C:\Users\Gefrezim\Desktop\AuthlyX\Examples\AuthlyX-Rust-Example\target\debug\authlyx-rust-example.exe: C:\Users\Gefrezim\Desktop\AuthlyX\Examples\AuthlyX-Rust-Example\src\authlyx.rs C:\Users\Gefrezim\Desktop\AuthlyX\Examples\AuthlyX-Rust-Example\src\main.rs

@@ -1,10 +1,10 @@
 use rand::RngCore;
 use reqwest::blocking::Client;
-use reqwest::header::{HeaderName, HeaderValue, CONTENT_TYPE, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE, USER_AGENT};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -51,6 +51,7 @@ pub struct UpdateData {
     pub available: bool,
     pub latest_version: String,
     pub download_url: String,
+    pub auto_update_enabled: bool,
     pub force_update: bool,
     pub changelog: String,
     pub show_reminder: bool,
@@ -81,6 +82,7 @@ pub struct AuthlyX {
     http: Client,
 }
 
+#[allow(dead_code)]
 impl AuthlyX {
     pub fn new(owner_id: &str, app_name: &str, version: &str, secret: &str, debug: bool, api: Option<&str>) -> Self {
         let base = api
@@ -350,8 +352,14 @@ impl AuthlyX {
         });
 
         let (_obj, ok) = self.post_json("init", payload);
+        self.prompt_update_if_needed(self.response.code.eq_ignore_ascii_case("UPDATE_REQUIRED"));
         self.initialized = ok && !self.session_id.is_empty();
         self.initialized
+    }
+
+    #[allow(non_snake_case)]
+    pub fn Init(&mut self) -> bool {
+        self.init()
     }
 
     pub fn login(&mut self, identifier: &str, password: Option<&str>, device_type: Option<&str>) -> bool {
@@ -362,6 +370,11 @@ impl AuthlyX {
             return self.license_login(identifier);
         }
         self.user_login(identifier, password.unwrap_or(""))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn Login(&mut self, identifier: &str, password: Option<&str>, device_type: Option<&str>) -> bool {
+        self.login(identifier, password, device_type)
     }
 
     pub fn user_login(&mut self, username: &str, password: &str) -> bool {
@@ -423,6 +436,11 @@ impl AuthlyX {
         ok
     }
 
+    #[allow(non_snake_case)]
+    pub fn Register(&mut self, username: &str, password: &str, license_key: &str, email: &str) -> bool {
+        self.register(username, password, license_key, email)
+    }
+
     pub fn change_password(&mut self, old_password: &str, new_password: &str) -> bool {
         if !self.ensure_initialized() {
             return false;
@@ -434,6 +452,16 @@ impl AuthlyX {
         });
         let (_obj, ok) = self.post_json("change-password", payload);
         ok
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChangePassword(&mut self, old_password: &str, new_password: &str) -> bool {
+        self.change_password(old_password, new_password)
+    }
+
+    #[allow(non_snake_case)]
+    pub fn changePassword(&mut self, old_password: &str, new_password: &str) -> bool {
+        self.change_password(old_password, new_password)
     }
 
     pub fn extend_time(&mut self, username: &str, license_key: &str) -> bool {
@@ -451,6 +479,16 @@ impl AuthlyX {
         ok
     }
 
+    #[allow(non_snake_case)]
+    pub fn ExtendTime(&mut self, username: &str, license_key: &str) -> bool {
+        self.extend_time(username, license_key)
+    }
+
+    #[allow(non_snake_case)]
+    pub fn extendTime(&mut self, username: &str, license_key: &str) -> bool {
+        self.extend_time(username, license_key)
+    }
+
     pub fn set_variable(&mut self, key: &str, value: &str) -> bool {
         if !self.ensure_initialized() {
             return false;
@@ -462,6 +500,16 @@ impl AuthlyX {
         });
         let (_obj, ok) = self.post_json("variables/set", payload);
         ok
+    }
+
+    #[allow(non_snake_case)]
+    pub fn SetVariable(&mut self, key: &str, value: &str) -> bool {
+        self.set_variable(key, value)
+    }
+
+    #[allow(non_snake_case)]
+    pub fn setVariable(&mut self, key: &str, value: &str) -> bool {
+        self.set_variable(key, value)
     }
 
     pub fn get_variable(&mut self, key: &str) -> Option<String> {
@@ -479,6 +527,16 @@ impl AuthlyX {
         Some(self.variable_data.var_value.clone())
     }
 
+    #[allow(non_snake_case)]
+    pub fn GetVariable(&mut self, key: &str) -> Option<String> {
+        self.get_variable(key)
+    }
+
+    #[allow(non_snake_case)]
+    pub fn getVariable(&mut self, key: &str) -> Option<String> {
+        self.get_variable(key)
+    }
+
     pub fn validate_session(&mut self) -> bool {
         if !self.initialized || self.session_id.is_empty() {
             return self.fail("INVALID_SESSION", "No active session. Please login first.", "", 0);
@@ -486,6 +544,16 @@ impl AuthlyX {
         let payload = json!({ "session_id": self.session_id });
         let (_obj, ok) = self.post_json("validate-session", payload);
         ok
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ValidateSession(&mut self) -> bool {
+        self.validate_session()
+    }
+
+    #[allow(non_snake_case)]
+    pub fn validateSession(&mut self) -> bool {
+        self.validate_session()
     }
 
     pub fn get_system_identifier(&self) -> String {
@@ -645,11 +713,239 @@ impl AuthlyX {
             self.update_data.available = u.get("available").and_then(|v| v.as_bool()).unwrap_or(false);
             self.update_data.latest_version = u.get("latest_version").and_then(|v| v.as_str()).unwrap_or("").to_string();
             self.update_data.download_url = u.get("download_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            self.update_data.auto_update_enabled = u.get("auto_update_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
             self.update_data.force_update = u.get("force_update").and_then(|v| v.as_bool()).unwrap_or(false);
             self.update_data.changelog = u.get("changelog").and_then(|v| v.as_str()).unwrap_or("").to_string();
             self.update_data.show_reminder = u.get("show_reminder").and_then(|v| v.as_bool()).unwrap_or(false);
             self.update_data.reminder_message = u.get("reminder_message").and_then(|v| v.as_str()).unwrap_or("").to_string();
             self.update_data.allowed_until = u.get("allowed_until").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            return;
+        }
+
+        if obj.get("auto_update_enabled").is_some() || obj.get("auto_update_download_url").is_some() {
+            self.update_data.available = true;
+            self.update_data.latest_version = obj
+                .get("server_version")
+                .and_then(|v| v.as_str())
+                .or_else(|| obj.get("version").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .to_string();
+            self.update_data.download_url = obj
+                .get("auto_update_download_url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            self.update_data.auto_update_enabled = obj.get("auto_update_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            self.update_data.force_update = obj.get("force_update").and_then(|v| v.as_bool()).unwrap_or(false);
+        }
+    }
+
+    fn compare_semver(current: &str, latest: &str) -> i32 {
+        fn strip(v: &str) -> &str {
+            match v.find('-') {
+                Some(i) => &v[..i],
+                None => v,
+            }
+        }
+
+        fn parse(v: &str) -> [i32; 3] {
+            let mut out = [0i32, 0i32, 0i32];
+            let s = strip(v.trim());
+            for (i, p) in s.split('.').take(3).enumerate() {
+                let digits: String = p.chars().take_while(|c| c.is_ascii_digit()).collect();
+                out[i] = digits.parse::<i32>().unwrap_or(0);
+            }
+            out
+        }
+
+        let a = parse(current);
+        let b = parse(latest);
+        for i in 0..3 {
+            if a[i] < b[i] {
+                return -1;
+            }
+            if a[i] > b[i] {
+                return 1;
+            }
+        }
+        0
+    }
+
+    fn should_show_update_prompt(&self, force_show: bool) -> bool {
+        if !self.update_data.available {
+            return false;
+        }
+        if force_show {
+            return true;
+        }
+        if !self.is_client_outdated() {
+            return false;
+        }
+        if !self.has_whitelisted_update_message() {
+            return false;
+        }
+        true
+    }
+
+    fn is_client_outdated(&self) -> bool {
+        if self.update_data.latest_version.trim().is_empty() {
+            return false;
+        }
+        Self::compare_semver(&self.version, &self.update_data.latest_version) < 0
+    }
+
+    fn has_whitelisted_update_message(&self) -> bool {
+        self.update_data.show_reminder || !self.update_data.allowed_until.trim().is_empty()
+    }
+
+    fn is_auto_update_enabled(&self) -> bool {
+        self.update_data.auto_update_enabled
+    }
+
+    fn format_display_date(raw: &str) -> String {
+        let value = raw.trim();
+        if value.is_empty() {
+            return String::new();
+        }
+        let normalized = value.replace('Z', "+00:00");
+        match OffsetDateTime::parse(&normalized, &Rfc3339) {
+            Ok(parsed) => {
+                let format = time::format_description::parse("[month repr:long] [day], [year]");
+                match format {
+                    Ok(items) => parsed.format(&items).unwrap_or_else(|_| value.to_string()),
+                    Err(_) => value.to_string(),
+                }
+            }
+            Err(_) => value.to_string(),
+        }
+    }
+
+    fn build_whitelisted_update_message(&self) -> String {
+        let base = if !self.update_data.allowed_until.trim().is_empty() {
+            format!(
+                "A new version is ready, and you can keep using this build until {}.",
+                Self::format_display_date(&self.update_data.allowed_until)
+            )
+        } else {
+            "A new version is ready, and you can still use this build for now.".to_string()
+        };
+
+        if !self.is_auto_update_enabled() {
+            return base;
+        }
+
+        format!("{base}\n\nWould you like to download the latest version now?")
+    }
+
+    fn escape_powershell(value: &str) -> String {
+        value.replace('\'', "''")
+    }
+
+    fn try_show_windows_message_box(&self, message: &str, yes_no: bool) -> Option<String> {
+        if !cfg!(windows) {
+            return None;
+        }
+
+        let button = if yes_no { "YesNo" } else { "OK" };
+        let script = format!(
+            "Add-Type -AssemblyName PresentationFramework; $result = [System.Windows.MessageBox]::Show('{}', 'AuthlyX Update', [System.Windows.MessageBoxButton]::{}, [System.Windows.MessageBoxImage]::Information); Write-Output $result",
+            Self::escape_powershell(message),
+            button
+        );
+
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    fn show_required_update_console(&self) {
+        let message = if self.response.message.trim().is_empty() {
+            "Please update your app to the latest version."
+        } else {
+            self.response.message.trim()
+        };
+        println!("{message}");
+
+        if !self.update_data.latest_version.trim().is_empty() {
+            println!("Latest version: {}", self.update_data.latest_version.trim());
+        }
+
+        if !self.is_auto_update_enabled() || self.update_data.download_url.trim().is_empty() {
+            return;
+        }
+
+        println!("1. Download Latest");
+        println!("2. Exit");
+
+        if !std::io::stdin().is_terminal() {
+            return;
+        }
+
+        print!("Select an option (1 or 2): ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_ok() && line.trim() == "1" {
+            self.open_url(self.update_data.download_url.trim());
+        }
+    }
+
+    fn open_url(&self, url: &str) {
+        let u = url.trim();
+        if u.is_empty() {
+            return;
+        }
+        if cfg!(windows) {
+            let _ = Command::new("cmd").args(["/c", "start", "", u]).spawn();
+        } else if cfg!(target_os = "macos") {
+            let _ = Command::new("open").arg(u).spawn();
+        } else {
+            let _ = Command::new("xdg-open").arg(u).spawn();
+        }
+    }
+
+    fn prompt_update_if_needed(&mut self, force_show: bool) {
+        if !self.should_show_update_prompt(force_show) {
+            return;
+        }
+
+        if force_show {
+            self.show_required_update_console();
+            return;
+        }
+
+        let download_url = self.update_data.download_url.trim();
+        let msg = self.build_whitelisted_update_message();
+        let use_download_prompt = self.is_auto_update_enabled() && !download_url.is_empty();
+
+        if let Some(result) = self.try_show_windows_message_box(&msg, use_download_prompt) {
+            if use_download_prompt && result.eq_ignore_ascii_case("Yes") {
+                self.open_url(download_url);
+            }
+            return;
+        }
+
+        self.log(format!("[UPDATE] {}", msg.replace('\n', " | ")));
+        println!("{msg}");
+
+        if !use_download_prompt || !std::io::stdin().is_terminal() {
+            return;
+        }
+
+        print!("Download the latest version now? (Y/N): ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_ok() {
+            let a = line.trim().to_lowercase();
+            if a == "y" || a == "yes" {
+                self.open_url(download_url);
+            }
         }
     }
 }

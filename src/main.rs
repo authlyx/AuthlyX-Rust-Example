@@ -43,12 +43,18 @@ fn show_user(sdk: &AuthlyX) {
 
 fn main() {
     let api = std::env::var("AUTHLYX_API").unwrap_or_else(|_| "https://authly.cc/api/v2".to_string());
+    let owner_id = std::env::var("AUTHLYX_OWNER_ID").unwrap_or_else(|_| "b49d11af8c42".to_string());
+    let app_name = std::env::var("AUTHLYX_APP_NAME").unwrap_or_else(|_| "TEST".to_string());
+    let version = std::env::var("AUTHLYX_VERSION").unwrap_or_else(|_| "1.3".to_string());
+    let secret = std::env::var("AUTHLYX_SECRET").unwrap_or_else(|_| "1L0edLKqHlFv0AL3NIQ7uPpikN2ECr7aZSHrNWMo".to_string());
+    let username = std::env::var("AUTHLYX_USERNAME").unwrap_or_default();
+    let password = std::env::var("AUTHLYX_PASSWORD").unwrap_or_default();
 
     let mut sdk = AuthlyX::new(
-        "12345678",
-        "HI",
-        "1.3",
-        "your-secret",
+        &owner_id,
+        &app_name,
+        &version,
+        &secret,
         true,
         Some(&api),
     );
@@ -59,20 +65,28 @@ fn main() {
         return;
     }
 
-    sdk.login("username", Some("password"), None);
-    show_result("Login", &sdk);
-    show_user(&sdk);
+    if !username.is_empty() && !password.is_empty() {
+        sdk.login(&username, Some(&password), None);
+        show_result("Login", &sdk);
+        if sdk.response.success {
+            show_user(&sdk);
 
-    sdk.set_variable("theme", "dark");
-    show_result("Set Variable", &sdk);
+            sdk.set_variable("theme", "dark");
+            show_result("Set Variable", &sdk);
 
-    let value = sdk.get_variable("theme").unwrap_or_default();
-    show_result("Get Variable", &sdk);
-    if sdk.response.success {
-        println!("Value: {}", value);
+            let value = sdk.get_variable("theme").unwrap_or_default();
+            show_result("Get Variable", &sdk);
+            if sdk.response.success {
+                println!("Value: {}", value);
+            }
+
+            sdk.validate_session();
+            show_result("Validate Session", &sdk);
+        }
+        return;
     }
 
-    sdk.validate_session();
-    show_result("Validate Session", &sdk);
+    println!();
+    println!("Init completed.");
+    println!("Set AUTHLYX_USERNAME and AUTHLYX_PASSWORD if you want to run the authenticated examples.");
 }
-
