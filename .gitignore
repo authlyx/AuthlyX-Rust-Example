@@ -1,0 +1,12 @@
+target/
+
+# Build outputs
+*.pdb
+*.rlib
+*.rmeta
+*.exe
+
+# Editor files
+.idea/
+.vscode/
+*.rs.bk
