@@ -1,3 +1,6 @@
+// AuthlyX SDK Version 2.1
+use base64::{engine::general_purpose, Engine as _};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::RngCore;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE, USER_AGENT};
@@ -66,6 +69,7 @@ pub struct AuthlyX {
     pub secret: String,
     pub base_url: String,
     pub debug: bool,
+    pub require_signed_responses: bool,
 
     pub session_id: String,
     pub initialized: bool,
@@ -73,6 +77,7 @@ pub struct AuthlyX {
 
     cached_ip: String,
     cached_ip_expires_at_ms: i64,
+    server_public_key_raw: [u8; 32],
 
     pub response: Response,
     pub user_data: UserData,
@@ -100,11 +105,16 @@ impl AuthlyX {
             secret: secret.to_string(),
             base_url: base,
             debug,
+            require_signed_responses: false,
             session_id: String::new(),
             initialized: false,
             application_hash: String::new(),
             cached_ip: String::new(),
             cached_ip_expires_at_ms: 0,
+            server_public_key_raw: [
+                129, 126, 101, 92, 248, 100, 105, 215, 144, 163, 60, 174, 119, 52, 241, 13,
+                122, 41, 116, 156, 88, 123, 16, 249, 169, 157, 50, 18, 175, 84, 56, 197,
+            ],
             response: Response::default(),
             user_data: UserData::default(),
             variable_data: VariableData::default(),
@@ -306,6 +316,11 @@ impl AuthlyX {
             }
         };
 
+        if !self.verify_signed_response(&hdrs, &request_id, &nonce, &obj.to_string()) {
+            self.fail("AUTH_INVALID_SIGNATURE", "Response signature verification failed.", &raw, status);
+            return (Value::Null, false);
+        }
+
         self.response.success = obj
             .get("success")
             .and_then(|v| v.as_bool())
@@ -327,6 +342,37 @@ impl AuthlyX {
         self.load_update_data(&obj);
 
         (obj, self.response.success)
+    }
+
+    fn verify_signed_response(&self, headers: &HeaderMap, request_id: &str, nonce: &str, canonical_body: &str) -> bool {
+        let signature = headers
+            .get("x-v2-signature")
+            .or_else(|| headers.get("x-auth-signature"))
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let signature_ts = headers
+            .get("x-v2-signature-ts")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        if signature.is_empty() || signature_ts.is_empty() {
+            return !self.require_signed_responses;
+        }
+
+        let sig_bytes = match general_purpose::STANDARD.decode(signature) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let sig = match Signature::from_slice(&sig_bytes) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let key = match VerifyingKey::from_bytes(&self.server_public_key_raw) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let payload = format!("{}\n{}\n{}\n{}", signature_ts, request_id, nonce, canonical_body);
+        key.verify(payload.as_bytes(), &sig).is_ok()
     }
 
     pub fn init(&mut self) -> bool {
