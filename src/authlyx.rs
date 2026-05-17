@@ -105,7 +105,7 @@ impl AuthlyX {
             secret: secret.to_string(),
             base_url: base,
             debug,
-            require_signed_responses: false,
+            require_signed_responses: true,
             session_id: String::new(),
             initialized: false,
             application_hash: String::new(),
