@@ -57,6 +57,7 @@ fn main() {
         &secret,
         true,
         Some(&api),
+        true, // anti_debug: set to false to disable anti-debugger protection (useful for local testing)
     );
 
     sdk.init();

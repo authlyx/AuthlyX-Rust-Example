@@ -1,4 +1,4 @@
-// AuthlyX SDK Version 2.1
+// AuthlyX SDK Version 2.2
 use base64::{engine::general_purpose, Engine as _};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::RngCore;
@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::{IsTerminal, Write};
+use std::net::{IpAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -69,11 +70,13 @@ pub struct AuthlyX {
     pub secret: String,
     pub base_url: String,
     pub debug: bool,
-    pub require_signed_responses: bool,
+    pub anti_debug: bool,
+    require_signed_responses: bool,
 
     pub session_id: String,
     pub initialized: bool,
     pub application_hash: String,
+    pub original_hash: String,
 
     cached_ip: String,
     cached_ip_expires_at_ms: i64,
@@ -89,14 +92,14 @@ pub struct AuthlyX {
 
 #[allow(dead_code)]
 impl AuthlyX {
-    pub fn new(owner_id: &str, app_name: &str, version: &str, secret: &str, debug: bool, api: Option<&str>) -> Self {
+    pub fn new(owner_id: &str, app_name: &str, version: &str, secret: &str, debug: bool, api: Option<&str>, anti_debug: bool) -> Self {
         let base = api
             .unwrap_or("https://authly.cc/api/v2")
             .trim()
             .trim_end_matches('/')
             .to_string();
 
-        let http = Client::builder().timeout(Duration::from_secs(30)).build().unwrap();
+        let http = Client::builder().timeout(Duration::from_secs(30)).no_proxy().build().unwrap();
 
         let mut sdk = Self {
             owner_id: owner_id.to_string(),
@@ -105,10 +108,12 @@ impl AuthlyX {
             secret: secret.to_string(),
             base_url: base,
             debug,
+            anti_debug,
             require_signed_responses: true,
             session_id: String::new(),
             initialized: false,
             application_hash: String::new(),
+            original_hash: String::new(),
             cached_ip: String::new(),
             cached_ip_expires_at_ms: 0,
             server_public_key_raw: [
@@ -122,7 +127,12 @@ impl AuthlyX {
             http,
         };
 
+        if anti_debug {
+            check_debugger();
+        }
+
         sdk.application_hash = sdk.get_current_application_hash();
+        sdk.original_hash = sdk.application_hash.clone();
         sdk.log(format!(
             "[SDK] AuthlyX initialized for app '{}' using '{}'.",
             sdk.app_name, sdk.base_url
@@ -211,6 +221,12 @@ impl AuthlyX {
         let file = root.join(format!("{}.log", utc_date_key()));
         let line = format!("[{}] {}\n", utc_time_key(), self.mask_sensitive(&content));
 
+        if fs::metadata(&file).map(|m| m.len()).unwrap_or(0) > 5 * 1024 * 1024 {
+            let old = root.join(format!("{}_old.log", utc_date_key()));
+            let _ = fs::remove_file(&old);
+            let _ = fs::rename(&file, &old);
+        }
+
         if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(file) {
             let _ = f.write_all(line.as_bytes());
         }
@@ -231,6 +247,16 @@ impl AuthlyX {
 
     fn post_json(&mut self, endpoint: &str, mut payload: Value) -> (Value, bool) {
         self.reset_response();
+
+        if self.anti_debug {
+            if let Ok(url) = reqwest::Url::parse(&self.build_url(endpoint)) {
+                if let Some(host) = url.host_str() {
+                    if is_domain_hijacked(host) {
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
 
         let (request_id, nonce, ts) = self.create_security_context();
         if let Some(obj) = payload.as_object_mut() {
@@ -262,10 +288,29 @@ impl AuthlyX {
             HeaderValue::from_str(&ts.to_string()).unwrap(),
         );
 
-        let res = match self.http.post(url).headers(headers).body(body).send() {
+        let max_attempts: usize = 3;
+        let retry_delays = [Duration::from_secs(1), Duration::from_secs(2)];
+        let mut send_result = Err(String::new());
+
+        for attempt in 1..=max_attempts {
+            match self.http.post(&url).headers(headers.clone()).body(body.clone()).send() {
+                Ok(r) => { send_result = Ok(r); break; }
+                Err(e) => {
+                    self.log(format!("[SDK] Network error on attempt {}: {}", attempt, e));
+                    if attempt < max_attempts {
+                        std::thread::sleep(retry_delays[attempt - 1]);
+                    } else {
+                        self.fail("NETWORK_ERROR", &format!("Network error after {} attempts: {}", max_attempts, e), "", 0);
+                        return (Value::Null, false);
+                    }
+                }
+            }
+        }
+
+        let res = match send_result {
             Ok(r) => r,
-            Err(e) => {
-                self.fail("NETWORK_ERROR", &format!("Network error: {}", e), "", 0);
+            Err(_) => {
+                self.fail("NETWORK_ERROR", "Request failed after all retry attempts.", "", 0);
                 return (Value::Null, false);
             }
         };
@@ -400,6 +445,10 @@ impl AuthlyX {
         let (_obj, ok) = self.post_json("init", payload);
         self.prompt_update_if_needed(self.response.code.eq_ignore_ascii_case("UPDATE_REQUIRED"));
         self.initialized = ok && !self.session_id.is_empty();
+        if self.initialized {
+            self.start_integrity_heartbeat();
+            self.start_exe_integrity_check();
+        }
         self.initialized
     }
 
@@ -435,6 +484,9 @@ impl AuthlyX {
             "ip": self.get_public_ip()
         });
         let (_obj, ok) = self.post_json("login", payload);
+        if ok {
+            self.check_blacklist();
+        }
         ok
     }
 
@@ -449,6 +501,9 @@ impl AuthlyX {
             "ip": self.get_public_ip()
         });
         let (_obj, ok) = self.post_json("licenses", payload);
+        if ok {
+            self.check_blacklist();
+        }
         ok
     }
 
@@ -684,6 +739,13 @@ impl AuthlyX {
             let lk = l.get("license_key").and_then(|v| v.as_str()).unwrap_or("");
             if !lk.is_empty() {
                 self.user_data.license_key = lk.to_string();
+                if self.user_data.username.is_empty() {
+                    self.user_data.username = lk.to_string();
+                }
+            }
+            let email = l.get("email").and_then(|v| v.as_str()).unwrap_or("");
+            if self.user_data.email.is_empty() && !email.is_empty() {
+                self.user_data.email = email.to_string();
             }
             let sub = l.get("subscription").and_then(|v| v.as_str()).unwrap_or("");
             if self.user_data.subscription.is_empty() && !sub.is_empty() {
@@ -699,6 +761,18 @@ impl AuthlyX {
             let exp = l.get("expiry_date").and_then(|v| v.as_str()).unwrap_or("");
             if self.user_data.expiry_date.is_empty() && !exp.is_empty() {
                 self.user_data.expiry_date = exp.to_string();
+            }
+            let ll = l.get("last_login").and_then(|v| v.as_str()).unwrap_or("");
+            if self.user_data.last_login.is_empty() && !ll.is_empty() {
+                self.user_data.last_login = ll.to_string();
+            }
+            let hwid = l.get("hwid").or_else(|| l.get("sid")).and_then(|v| v.as_str()).unwrap_or("");
+            if self.user_data.hwid.is_empty() && !hwid.is_empty() {
+                self.user_data.hwid = hwid.to_string();
+            }
+            let ip = l.get("ip_address").and_then(|v| v.as_str()).unwrap_or("");
+            if self.user_data.ip_address.is_empty() && !ip.is_empty() {
+                self.user_data.ip_address = ip.to_string();
             }
         }
 
@@ -848,21 +922,35 @@ impl AuthlyX {
         self.update_data.auto_update_enabled
     }
 
+    fn parse_date(s: &str) -> Option<OffsetDateTime> {
+        let s = s.trim();
+        let normalized = s.replace('Z', "+00:00");
+        if let Ok(dt) = OffsetDateTime::parse(&normalized, &Rfc3339) {
+            return Some(dt);
+        }
+        // Handle "YYYY-MM-DD HH:MM:SS" (no timezone — treat as UTC)
+        if let Ok(fmt) = time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]") {
+            if let Ok(pdt) = time::PrimitiveDateTime::parse(s, &fmt) {
+                return Some(pdt.assume_utc());
+            }
+        }
+        None
+    }
+
     fn format_display_date(raw: &str) -> String {
         let value = raw.trim();
         if value.is_empty() {
             return String::new();
         }
-        let normalized = value.replace('Z', "+00:00");
-        match OffsetDateTime::parse(&normalized, &Rfc3339) {
-            Ok(parsed) => {
+        match Self::parse_date(value) {
+            Some(parsed) => {
                 let format = time::format_description::parse("[month repr:long] [day], [year]");
                 match format {
                     Ok(items) => parsed.format(&items).unwrap_or_else(|_| value.to_string()),
                     Err(_) => value.to_string(),
                 }
             }
-            Err(_) => value.to_string(),
+            None => value.to_string(),
         }
     }
 
@@ -956,6 +1044,52 @@ impl AuthlyX {
         }
     }
 
+    pub fn check_blacklist(&mut self) -> bool {
+        let ip = self.get_public_ip();
+        let payload = json!({
+            "session_id": self.session_id,
+            "hwid": self.user_data.hwid.clone(),
+            "ip": ip
+        });
+        let (_obj, ok) = self.post_json("blacklist/check", payload);
+        ok
+    }
+
+    fn start_integrity_heartbeat(&self) {
+        let anti_debug = self.anti_debug;
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(60));
+                if anti_debug {
+                    check_debugger();
+                }
+            }
+        });
+    }
+
+    fn start_exe_integrity_check(&self) {
+        let original = self.original_hash.clone();
+        let anti_debug = self.anti_debug;
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(120));
+                let current = {
+                    let file = match std::env::current_exe() {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
+                    let b = fs::read(file).unwrap_or_default();
+                    let mut h = Sha256::new();
+                    h.update(&b);
+                    hex::encode(h.finalize())
+                };
+                if anti_debug && current != original {
+                    std::process::exit(1);
+                }
+            }
+        });
+    }
+
     fn prompt_update_if_needed(&mut self, force_show: bool) {
         if !self.should_show_update_prompt(force_show) {
             return;
@@ -996,6 +1130,41 @@ impl AuthlyX {
     }
 }
 
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || o[0] == 10
+                || (o[0] == 172 && o[1] >= 16 && o[1] <= 31)
+                || (o[0] == 192 && o[1] == 168)
+        }
+        IpAddr::V6(v6) => v6.is_loopback(),
+    }
+}
+
+fn is_domain_hijacked(domain: &str) -> bool {
+    let addr = format!("{}:443", domain);
+    match addr.to_socket_addrs() {
+        Ok(addrs) => addrs.into_iter().any(|a| is_private_ip(a.ip())),
+        Err(_) => false,
+    }
+}
+
+fn check_debugger() {
+    if cfg!(windows) {
+        if let Ok(output) = Command::new("tasklist").output() {
+            let list = String::from_utf8_lossy(&output.stdout).to_lowercase();
+            let debuggers = ["x64dbg.exe", "x32dbg.exe", "ollydbg.exe", "windbg.exe", "idaq.exe", "idaq64.exe", "cheatengine"];
+            for d in &debuggers {
+                if list.contains(d) {
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
 fn windows_sid() -> Option<String> {
     let out = Command::new("whoami")
         .args(["/user", "/fo", "csv", "/nh"])
@@ -1021,19 +1190,21 @@ fn compute_days_left(expiry: &str) -> i64 {
     if expiry.trim().is_empty() {
         return 0;
     }
-    let s = expiry.trim().replace('Z', "+00:00");
-    let dt = OffsetDateTime::parse(&s, &Rfc3339).ok();
-    if dt.is_none() {
-        return 0;
-    }
-    let dt = dt.unwrap();
-    let now = OffsetDateTime::now_utc();
-    let diff = dt - now;
-    let days = diff.whole_days();
-    if days < 0 {
-        0
-    } else {
-        days
+    let s = expiry.trim();
+    let normalized = s.replace('Z', "+00:00");
+    let dt = OffsetDateTime::parse(&normalized, &Rfc3339).ok().or_else(|| {
+        time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]")
+            .ok()
+            .and_then(|fmt| time::PrimitiveDateTime::parse(s, &fmt).ok())
+            .map(|pdt| pdt.assume_utc())
+    });
+    match dt {
+        None => 0,
+        Some(dt) => {
+            let diff = dt - OffsetDateTime::now_utc();
+            let days = diff.whole_days();
+            if days < 0 { 0 } else { days }
+        }
     }
 }
 
