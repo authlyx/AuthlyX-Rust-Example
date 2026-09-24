@@ -16,18 +16,20 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "authlyx-rust-example"
-version = "1.0.0"
+version = "2.4.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
  "hex",
  "rand 0.8.6",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
  "time",
  "uuid",
+ "webpki-roots",
 ]
 
 [[package]]

@@ -1,4 +1,4 @@
-// AuthlyX SDK Version 2.2
+// AuthlyX SDK V2.4
 use base64::{engine::general_purpose, Engine as _};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::RngCore;
@@ -15,6 +15,61 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
+use std::sync::Arc;
+use rustls::client::danger::{ServerCertVerifier, ServerCertVerified, HandshakeSignatureValid};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+
+#[derive(Debug)]
+struct PinnedServerVerifier {
+    default: Arc<rustls::client::WebPkiServerVerifier>,
+}
+
+impl ServerCertVerifier for PinnedServerVerifier {
+    fn verify_server_cert(&self, leaf: &CertificateDer<'_>, intermediates: &[CertificateDer<'_>],
+        host: &ServerName<'_>, ocsp: &[u8], now: UnixTime) -> Result<ServerCertVerified, rustls::Error> {
+        let verified = self.default.verify_server_cert(leaf, intermediates, host, ocsp, now)?;
+        if let ServerName::DnsName(name) = host {
+            if name.as_ref().trim_end_matches('.').eq_ignore_ascii_case("authly.cc") {
+                let mut pinned_roots = rustls::RootCertStore::empty();
+                for cert in std::iter::once(leaf).chain(intermediates.iter()) {
+                    let hash = hex::encode_upper(Sha256::digest(cert.as_ref()));
+                    if hash == "1DFC1605FBAD358D8BC844F76D15203FAC9CA5C1A79FD4857FFAF2864FBEBF96" ||
+                        hash == "76B27B80A58027DC3CF1DA68DAC17010ED93997D0B603E2FADBE85012493B5A7" {
+                        pinned_roots.add(cert.clone())?;
+                    }
+                }
+                if pinned_roots.is_empty() { return Err(rustls::Error::General("AuthlyX TLS certificate chain does not match a trusted pin".into())); }
+
+
+                let pinned = rustls::client::WebPkiServerVerifier::builder_with_provider(
+                    Arc::new(pinned_roots), Arc::new(rustls::crypto::ring::default_provider()))
+                    .build().map_err(|e| rustls::Error::General(e.to_string()))?;
+                pinned.verify_server_cert(leaf, intermediates, host, ocsp, now)?;
+            }
+        }
+        Ok(verified)
+    }
+    fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>, signature: &rustls::DigitallySignedStruct)
+        -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.default.verify_tls12_signature(message, cert, signature)
+    }
+    fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, signature: &rustls::DigitallySignedStruct)
+        -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.default.verify_tls13_signature(message, cert, signature)
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> { self.default.supported_verify_schemes() }
+}
+
+fn pinned_tls_config() -> rustls::ClientConfig {
+
+    let roots = Arc::new(rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()));
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let default = rustls::client::WebPkiServerVerifier::builder_with_provider(roots, provider.clone())
+        .build().expect("TLS trust roots unavailable");
+    rustls::ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions()
+        .expect("TLS protocol configuration failed").dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedServerVerifier { default })).with_no_client_auth()
+}
 
 #[derive(Clone, Default)]
 pub struct Response {
@@ -99,7 +154,8 @@ impl AuthlyX {
             .trim_end_matches('/')
             .to_string();
 
-        let http = Client::builder().timeout(Duration::from_secs(30)).no_proxy().build().unwrap();
+        let http = Client::builder().use_preconfigured_tls(pinned_tls_config())
+            .timeout(Duration::from_secs(30)).no_proxy().build().unwrap();
 
         let mut sdk = Self {
             owner_id: owner_id.to_string(),
@@ -439,7 +495,8 @@ impl AuthlyX {
             "app_name": self.app_name,
             "version": self.version,
             "secret": self.secret,
-            "hash": self.get_current_application_hash()
+            "hash": self.get_current_application_hash(),
+            "ip": self.get_public_ip()
         });
 
         let (_obj, ok) = self.post_json("init", payload);
@@ -766,6 +823,10 @@ impl AuthlyX {
             if self.user_data.last_login.is_empty() && !ll.is_empty() {
                 self.user_data.last_login = ll.to_string();
             }
+            let ra = l.get("registered_at").or_else(|| l.get("date_created")).and_then(|v| v.as_str()).unwrap_or("");
+            if self.user_data.registered_at.is_empty() && !ra.is_empty() {
+                self.user_data.registered_at = ra.to_string();
+            }
             let hwid = l.get("hwid").or_else(|| l.get("sid")).and_then(|v| v.as_str()).unwrap_or("");
             if self.user_data.hwid.is_empty() && !hwid.is_empty() {
                 self.user_data.hwid = hwid.to_string();
@@ -817,7 +878,16 @@ impl AuthlyX {
             self.user_data.ip_address = self.get_public_ip();
         }
 
-        self.user_data.days_left = compute_days_left(&self.user_data.expiry_date);
+
+
+
+        let raw_days_left = obj.get("days_left")
+            .or_else(|| user.and_then(|u| u.get("days_left")))
+            .or_else(|| lic.and_then(|l| l.get("days_left")))
+            .or_else(|| dev.and_then(|d| d.get("days_left")))
+            .and_then(|v| v.as_i64());
+
+        self.user_data.days_left = raw_days_left.unwrap_or_else(|| compute_days_left(&self.user_data.expiry_date));
     }
 
     fn load_variable_data(&mut self, obj: &Value) {
@@ -928,7 +998,7 @@ impl AuthlyX {
         if let Ok(dt) = OffsetDateTime::parse(&normalized, &Rfc3339) {
             return Some(dt);
         }
-        // Handle "YYYY-MM-DD HH:MM:SS" (no timezone — treat as UTC)
+
         if let Ok(fmt) = time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]") {
             if let Ok(pdt) = time::PrimitiveDateTime::parse(s, &fmt) {
                 return Some(pdt.assume_utc());
