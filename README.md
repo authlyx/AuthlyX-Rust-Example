@@ -1,139 +1,86 @@
 # AuthlyX Rust SDK
 
-This is a Rust authentication SDK for desktop and CLI applications that want simple integration with the AuthlyX API.
+Official Rust SDK and console example for AuthlyX V3 (3.0.0 beta).
 
-This folder includes the SDK in `src/authlyx.rs` and a runnable example in `src/main.rs`.
+Full documentation: https://docs.authlyx.dev
 
 ## Requirements
 
-- Rust
-- Cargo
+- Windows
+- Rust 1.88 or newer
 
-## Quick Start
+## Run the example
+
+Put your app key and version in `src/main.rs`:
 
 ```rust
-mod authlyx;
+let app = match AuthlyX::new("YOUR_APP_KEY", "1.0.0").await {
+```
 
-use authlyx::AuthlyX;
+Then run it:
 
-fn main() {
-    let mut authlyx_app = AuthlyX::new(
-        "12345678",
-        "MYAPP",
-        "1.0.0",
-        "your-secret",
-        true,
-        None,
-    );
+```bat
+cargo run --release
+```
 
-    authlyx_app.init();
+You can find your app key under your app's credentials in the [dashboard](https://dash.authlyx.dev).
+
+## Add it to your own project
+
+Copy `src/AuthlyX.rs` into your project, or add this repo as a path dependency. The dependencies it needs are listed in `Cargo.toml`.
+
+```rust
+use authlyx_sdk_v3::AuthlyX;
+
+let app = AuthlyX::new("YOUR_APP_KEY", "1.0.0").await?;
+let result = app.initialize().await?;
+if !result.success {
+    println!("{}", result.message);
 }
 ```
 
-## Optional Parameters
+Every call returns a `Result`. `?` handles SDK errors, and `success` tells you whether AuthlyX approved the request.
+
+## Signing in
 
 ```rust
-let mut authlyx_app = AuthlyX::new(
-    "12345678",
-    "MYAPP",
-    "1.0.0",
-    "your-secret",
-    false,
-    Some("https://example.com/api/v2"),
-);
+app.login("YOUR_USERNAME", "YOUR_PASSWORD").await?;
+app.licenseLogin("YOUR_LICENSE_KEY").await?;
+app.deviceLogin().await?;
 ```
 
-### Available options
+Device login signs in the current Windows user without a form. The device has to be approved in your app first. See [Device login](https://docs.authlyx.dev/guides/device-login).
 
-- `debug`
-  - Default: `true`
-  - Set `false` to disable SDK logs
-
-- `api`
-  - Default: `https://authly.cc/api/v2`
-  - Use this for your custom domain
-
-## Available Methods
-
-- `init()`
-- `login(identifier, password, device_type)`
-- `register(username, password, license_key, email)`
-- `change_password(old_password, new_password)`
-- `extend_time(username, license_key)`
-- `get_variable(key)`
-- `set_variable(key, value)`
-- `validate_session()`
-
-## Authentication Example
+After signing in, the account details are in `userData`:
 
 ```rust
-// Username + password
-authlyx_app.login("username", Some("password"), None);
-
-// License key only
-authlyx_app.login("XXXXX-XXXXX-XXXXX-XXXXX-XXXXX", None, None);
-
-// Device login
-authlyx_app.login("YOUR_MOTHERBOARD_ID", None, Some("motherboard"));
+let user = app.userData();
+let username = user["name"].as_str().unwrap_or_default();
+let plan = user["plan"].as_str().unwrap_or_default();
+let expiry = user["expiry"].as_str().unwrap_or_default();
 ```
 
-## Username Login Example
+Every method has its own page with examples under [SDK methods](https://docs.authlyx.dev/sdks/methods/login).
+
+## Offline access
+
+Once someone is signed in, saving offline access stores a signed permit on that PC:
 
 ```rust
-authlyx_app.login("username", Some("password"), None);
-
-if authlyx_app.response.success {
-    println!("Login success");
-    println!("{}", authlyx_app.user_data.username);
-    println!("{}", authlyx_app.user_data.subscription_level);
-} else {
-    println!("{}", authlyx_app.response.message);
-}
+let saved = app.saveOfflineAccess().await?;
+let available = app.hasOfflineAccess().await;
 ```
 
-## Variable Example
+If they open your app later without internet, they sign in with the same username and password or license key, and the SDK checks it against the saved permit. Each permit belongs to one app and one account, and signing out removes it. More in [Offline access](https://docs.authlyx.dev/guides/offline).
 
-```rust
-authlyx_app.set_variable("theme", "dark");
+## Errors
 
-let value = authlyx_app.get_variable("theme").unwrap_or_default();
-println!("{}", value);
-```
+An `Error` has a `code` and a `message` you can show to the user. When the server turns a request down you get a response with `success` set to false instead. All codes are listed in [Errors](https://docs.authlyx.dev/api-reference/errors).
 
-## Logging
+## Coming from 2.4
 
-By default, SDK logging is enabled.
+V3 is a new SDK, not a drop-in update. Apps use an app key instead of the old owner ID, app name and secret, and the method names changed. Read [Move from V2 to V3](https://docs.authlyx.dev/api-reference/migration) before you switch.
 
-Logs are written to:
+## License
 
-`C:\ProgramData\AuthlyX\{AppName}\YYYY_MM_DD.log`
-
-To disable logs:
-
-```rust
-let mut authlyx_app = AuthlyX::new(
-    "12345678",
-    "MYAPP",
-    "1.0.0",
-    "your-secret",
-    false,
-    None,
-);
-```
-
-Sensitive values such as passwords, secrets, session IDs, request IDs, nonces, license keys, and hashes are masked automatically.
-
-## Example Project
-
-The runnable example in `src/main.rs` uses the public test app by default for `init()`.
-
-If you want to run the authenticated example too, set:
-
-- `AUTHLYX_USERNAME`
-- `AUTHLYX_PASSWORD`
-
-Then run:
-
-```powershell
-cargo run
-```
+MIT. See `LICENSE.txt`.

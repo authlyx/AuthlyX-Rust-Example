@@ -1,18 +1,24 @@
 [package]
-name = "authlyx-rust-example"
-version = "2.4.0"
+name = "authlyx-sdk-v3"
+version = "3.0.0-beta.1"
 edition = "2021"
-
+rust-version = "1.88"
+publish = false
+license-file = "LICENSE.txt"
+[lib]
+path = "src/AuthlyX.rs"
 [dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-uuid = { version = "1", features = ["v4"] }
-rand = "0.8"
-sha2 = "0.10"
-hex = "0.4"
-time = { version = "0.3", features = ["parsing", "formatting"] }
+async-trait = "0.1"
 base64 = "0.22"
-ed25519-dalek = "2"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-webpki-roots = "1"
+chrono = "0.4"
+ed25519-dalek = { version = "2.2", features = ["rand_core", "pkcs8", "pem"] }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+url = "2"
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
